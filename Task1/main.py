@@ -1,7 +1,8 @@
 """
 Task 1: Binary Defect Classification
 """
-
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import torch
 import numpy as np
 import os
@@ -132,19 +133,19 @@ class ManualMLP:
     
     def compute_loss(self, Y_pred, Y_true, pos_weight=1.0):
         """
-        计算 BCE Loss（带类别权重）
-        pos_weight: 正样本（缺陷）的权重
+        计算加权 BCE Loss，正样本权重可调。
+        pos_weight: 正样本（缺陷）的权重，建议8~10。
         """
         epsilon = 1e-7  # 防止 log(0)
-        # 使用 torch.where 替代 torch.clamp
+        # 保证概率数值稳定
         Y_pred = torch.where(Y_pred < epsilon, torch.ones_like(Y_pred) * epsilon, Y_pred)
         Y_pred = torch.where(Y_pred > 1 - epsilon, torch.ones_like(Y_pred) * (1 - epsilon), Y_pred)
-        
-        # 加权 BCE Loss
-        loss_pos = -pos_weight * Y_true * torch.log(Y_pred)
-        loss_neg = -(1 - Y_true) * torch.log(1 - Y_pred)
-        loss = torch.mean(loss_pos + loss_neg)
-        
+        # 正样本加权
+        weight = torch.ones_like(Y_true)
+        weight[Y_true == 1] = pos_weight
+        # BCE Loss
+        loss = - (Y_true * torch.log(Y_pred) + (1 - Y_true) * torch.log(1 - Y_pred))
+        loss = (loss * weight).mean()
         return loss
     
     def save_model(self, path):
@@ -264,6 +265,53 @@ def split_dataset(images, labels, filenames, val_ratio=0.2, random_seed=42):
     return (train_images, train_labels, train_files), (val_images, val_labels, val_files)
 
 
+def oversample_positive(images, labels, filenames, target_ratio=0.3, random_seed=42):
+    """
+    对正样本（缺陷）进行过采样，平衡训练集
+    target_ratio: 目标正样本比例（0.3表示希望正样本占30%）
+    """
+    np.random.seed(random_seed)
+    
+    # 分离正负样本
+    pos_indices = np.where(labels == 1)[0]
+    neg_indices = np.where(labels == 0)[0]
+    
+    n_pos = len(pos_indices)
+    n_neg = len(neg_indices)
+    
+    print(f"\n过采样前 - 正样本: {n_pos}, 负样本: {n_neg}, 比例: {n_pos/(n_pos+n_neg)*100:.2f}%")
+    
+    # 计算需要多少正样本才能达到目标比例
+    # target_ratio = n_pos_new / (n_pos_new + n_neg)
+    # n_pos_new = target_ratio * n_neg / (1 - target_ratio)
+    n_pos_needed = int(target_ratio * n_neg / (1 - target_ratio))
+    
+    if n_pos_needed <= n_pos:
+        print("警告: 正样本已经足够多，无需过采样")
+        return images, labels, filenames
+    
+    # 过采样：重复采样正样本
+    n_to_sample = n_pos_needed - n_pos
+    sampled_indices = np.random.choice(pos_indices, size=n_to_sample, replace=True)
+    
+    # 合并原始数据和过采样数据
+    images_oversampled = np.concatenate([images, images[sampled_indices]], axis=0)
+    labels_oversampled = np.concatenate([labels, labels[sampled_indices]], axis=0)
+    filenames_oversampled = filenames + [filenames[i] for i in sampled_indices]
+    
+    # 打乱数据
+    shuffle_indices = np.random.permutation(len(images_oversampled))
+    images_oversampled = images_oversampled[shuffle_indices]
+    labels_oversampled = labels_oversampled[shuffle_indices]
+    filenames_oversampled = [filenames_oversampled[i] for i in shuffle_indices]
+    
+    n_pos_new = np.sum(labels_oversampled == 1)
+    n_neg_new = np.sum(labels_oversampled == 0)
+    print(f"过采样后 - 正样本: {n_pos_new}, 负样本: {n_neg_new}, 比例: {n_pos_new/(n_pos_new+n_neg_new)*100:.2f}%")
+    
+    return images_oversampled, labels_oversampled, filenames_oversampled
+
+
 # ==================== 评价指标 ====================
 def compute_metrics(y_true, y_pred_probs, threshold=0.5):
     """
@@ -309,13 +357,13 @@ def train():
     """训练主函数"""
     
     # ===== 超参数设置 =====
-    IMG_SIZE = 64  # 图片缩放尺寸（原图 320 太大，建议用 64 或 128）
-    HIDDEN_SIZE = 256  # 隐藏层神经元数量（增加到256以提升表达能力）
-    LEARNING_RATE = 0.005  # 学习率（增加到0.005以加快收敛）
-    EPOCHS = 100  # 训练轮数（增加到100）
-    BATCH_SIZE = 64  # 批次大小（增加到64以利用GPU）
-    POS_WEIGHT = 20.0  # 正样本（缺陷）权重（大幅增加到20以解决类别不平衡）
-    THRESHOLD = 0.3  # 分类阈值（降低到0.3以提高召回率）
+    IMG_SIZE = 64  # 图片缩放尺寸
+    HIDDEN_SIZE = 512  # 隐藏层神经元数量
+    LEARNING_RATE = 0.001  # 学习率（降低，便于收敛）
+    EPOCHS = 150  # 训练轮数
+    BATCH_SIZE = 64  # 批次大小
+    POS_WEIGHT = 8.0  # 正样本权重
+    THRESHOLD = 0.5  # 分类阈值（先用0.5，后期可微调）
     
     # 数据路径（请根据实际情况修改）
     DATA_DIR = './data'  # 假设数据在 Task1/data/ 下
@@ -347,7 +395,15 @@ def train():
     (train_images, train_labels, train_files), \
     (val_images, val_labels, val_files) = split_dataset(images, labels, filenames)
     
-    print(f"训练集: {len(train_images)} 张, 验证集: {len(val_images)} 张")
+    print(f"\n划分后 - 训练集: {len(train_images)} 张, 验证集: {len(val_images)} 张")
+    
+    # 对训练集进行过采样（只对训练集，不对验证集）
+    # 目标：正样本占30%，可根据实际情况调整
+    train_images, train_labels, train_files = oversample_positive(
+        train_images, train_labels, train_files, 
+        target_ratio=0.3
+    )
+    print(f"\n最终训练集大小: {len(train_images)} 张")
     
     # 转为 Tensor 并移到 GPU
     X_train = torch.from_numpy(train_images).float().to(device)
@@ -422,15 +478,14 @@ def train():
                 threshold=THRESHOLD
             )
         
-        # 打印训练信息
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"Epoch [{epoch+1}/{EPOCHS}] "
-                  f"Train Loss: {avg_loss:.4f} | "
-                  f"Val Loss: {val_loss:.4f} | "
-                  f"F1: {metrics['f1']:.4f} | "
-                  f"Precision: {metrics['precision']:.4f} | "
-                  f"Recall: {metrics['recall']:.4f} | "
-                  f"Threshold: {THRESHOLD}")
+        # 每轮都打印训练日志，便于观察收敛
+        print(f"Epoch [{epoch+1}/{EPOCHS}] "
+              f"Train Loss: {avg_loss:.4f} | "
+              f"Val Loss: {val_loss:.4f} | "
+              f"F1: {metrics['f1']:.4f} | "
+              f"Precision: {metrics['precision']:.4f} | "
+              f"Recall: {metrics['recall']:.4f} | "
+              f"Threshold: {THRESHOLD}")
         
         # 保存最佳模型
         if metrics['f1'] > best_f1:

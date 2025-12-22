@@ -18,15 +18,19 @@ class ManualMLP:
     完全手动实现的多层感知机（仅推理）
     """
     
-    def __init__(self):
+    def __init__(self, device='cpu'):
         self.W1 = None
         self.b1 = None
         self.W2 = None
         self.b2 = None
+        self.device = device
     
     def sigmoid(self, z):
         """Sigmoid 激活函数"""
-        return 1.0 / (1.0 + torch.exp(-torch.clamp(z, -100, 100)))
+        # 防止溢出 - 使用 torch.where 替代 torch.clamp
+        z_safe = torch.where(z > 100, torch.ones_like(z) * 100, z)
+        z_safe = torch.where(z_safe < -100, torch.ones_like(z_safe) * (-100), z_safe)
+        return 1.0 / (1.0 + torch.exp(-z_safe))
     
     def relu(self, z):
         """ReLU 激活函数"""
@@ -38,6 +42,9 @@ class ManualMLP:
         X: (batch_size, input_size)
         返回: (batch_size, 1) 的概率值
         """
+        # 确保输入在正确的设备上
+        X = X.to(self.device)
+        
         # 第一层：Linear + ReLU
         Z1 = torch.matmul(X, self.W1) + self.b1
         A1 = self.relu(Z1)
@@ -53,11 +60,11 @@ class ManualMLP:
         if not os.path.exists(path):
             raise FileNotFoundError(f"找不到模型文件: {path}")
         
-        model_dict = torch.load(path)
-        self.W1 = model_dict['W1']
-        self.b1 = model_dict['b1']
-        self.W2 = model_dict['W2']
-        self.b2 = model_dict['b2']
+        model_dict = torch.load(path, map_location=self.device)
+        self.W1 = model_dict['W1'].to(self.device)
+        self.b1 = model_dict['b1'].to(self.device)
+        self.W2 = model_dict['W2'].to(self.device)
+        self.b2 = model_dict['b2'].to(self.device)
         
         print(f"模型加载成功: {path}")
 
@@ -102,6 +109,12 @@ def test(test_data_path, model_path='./model_weights.pth', img_size=64):
     print("Task 1: Binary Defect Classification - 测试开始")
     print("=" * 60)
     
+    # ===== GPU 设备检测 =====
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"\n使用设备: {device}")
+    if device == 'cuda':
+        print(f"GPU 名称: {torch.cuda.get_device_name(0)}")
+    
     # 检查测试数据路径
     img_dir = os.path.join(test_data_path, 'img')
     if not os.path.exists(img_dir):
@@ -109,7 +122,7 @@ def test(test_data_path, model_path='./model_weights.pth', img_size=64):
         sys.exit(1)
     
     # 加载模型
-    model = ManualMLP()
+    model = ManualMLP(device=device)
     try:
         model.load_model(model_path)
     except FileNotFoundError as e:
@@ -139,7 +152,10 @@ def test(test_data_path, model_path='./model_weights.pth', img_size=64):
         
         # 前向传播（推理）
         with torch.no_grad():
-            pred_prob = model.forward(img_tensor).item()
+            pred_prob = model.forward(img_tensor)
+            if device == 'cuda':
+                pred_prob = pred_prob.cpu()
+            pred_prob = pred_prob.item()
         
         # 二分类：概率 > 0.5 -> True (Defective), 否则 False (Non-defective)
         pred_label = pred_prob > 0.5
@@ -151,8 +167,7 @@ def test(test_data_path, model_path='./model_weights.pth', img_size=64):
         results[base_name] = pred_label
     
     # 获取 Leader ID（从当前目录的脚本名推断，或使用默认值）
-    # 注意: 请将 'PB23000000' 替换为你的实际学号
-    leader_id = 'PB23000000'  # TODO: 修改为你的学号
+    leader_id = 'PB23071385'
     
     # 保存 JSON 文件
     output_file = f"{leader_id}.json"

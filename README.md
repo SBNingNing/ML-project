@@ -1,5 +1,5 @@
 ## 项目结构
-
+Python=3.9.25
 ```
 ML-project/
 ├── Task1/                    # 任务1：二分类（从零实现）
@@ -11,7 +11,7 @@ ML-project/
 │   ├── model_weights.pth    # 训练后生成的模型
 │   └── data/                # 数据目录
 │       ├── img/             # 图片文件夹
-│       ├── label/           # 标签文件夹
+│       ├── txt/             # 标签文件夹
 │       └── README.md        # 数据说明
 │
 ├── Task2/                    # 任务2：（待实现）
@@ -76,7 +76,7 @@ Task1/data/
 ├── img/              # 所有图片
 │   ├── glass_001.png
 │   └── ...
-└── label/            # 缺陷标注
+└── txt/              # 缺陷标注
     ├── glass_001.txt  # 有此文件表示有缺陷
     └── ...
 ```

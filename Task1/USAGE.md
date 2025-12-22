@@ -14,7 +14,7 @@ Task1/
 │   │   ├── glass_002.png
 │   │   ├── glass_003.png
 │   │   └── ...
-│   └── label/            # 存放缺陷标注（txt文件）
+│   └── txt/              # 存放缺陷标注（txt文件）
 │       ├── glass_001.txt  # 有此文件表示 glass_001.png 有缺陷
 │       ├── glass_003.txt
 │       └── ...
@@ -178,7 +178,7 @@ EPOCHS = 30  # 默认 50
 **解决**：确保数据目录结构正确：
 ```
 Task1/data/img/     # 图片文件夹
-Task1/data/label/   # 标签文件夹（可选）
+Task1/data/txt/     # 标签文件夹（可选）
 ```
 
 ### 错误 2: 模型全预测一个类别

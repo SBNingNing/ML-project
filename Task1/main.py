@@ -18,33 +18,37 @@ class ManualMLP:
     不使用 autograd、torch.optim 和 torch.nn 的自动层
     """
     
-    def __init__(self, input_size, hidden_size, output_size, learning_rate=0.001):
+    def __init__(self, input_size, hidden_size, output_size, learning_rate=0.001, device='cpu'):
         """
         初始化模型参数
         input_size: 输入维度
         hidden_size: 隐藏层维度
         output_size: 输出维度 (1 for binary classification)
+        device: 'cpu' 或 'cuda'
         """
         self.lr = learning_rate
+        self.device = device
         
         # Xavier 初始化权重
         # 第一层：input -> hidden
         scale1 = torch.sqrt(torch.Tensor([2.0 / (input_size + hidden_size)]))
-        self.W1 = torch.randn(input_size, hidden_size) * scale1
-        self.b1 = torch.zeros(hidden_size)
+        self.W1 = (torch.randn(input_size, hidden_size) * scale1).to(device)
+        self.b1 = torch.zeros(hidden_size).to(device)
         
         # 第二层：hidden -> output
         scale2 = torch.sqrt(torch.Tensor([2.0 / (hidden_size + output_size)]))
-        self.W2 = torch.randn(hidden_size, output_size) * scale2
-        self.b2 = torch.zeros(output_size)
+        self.W2 = (torch.randn(hidden_size, output_size) * scale2).to(device)
+        self.b2 = torch.zeros(output_size).to(device)
         
         # 缓存中间结果（用于反向传播）
         self.cache = {}
     
     def sigmoid(self, z):
         """Sigmoid 激活函数"""
-        # 防止溢出
-        return 1.0 / (1.0 + torch.exp(-torch.clamp(z, -100, 100)))
+        # 防止溢出 - 使用 torch.where 替代 torch.clamp
+        z_safe = torch.where(z > 100, torch.ones_like(z) * 100, z)
+        z_safe = torch.where(z_safe < -100, torch.ones_like(z_safe) * (-100), z_safe)
+        return 1.0 / (1.0 + torch.exp(-z_safe))
     
     def relu(self, z):
         """ReLU 激活函数"""
@@ -56,6 +60,9 @@ class ManualMLP:
         X: (batch_size, input_size)
         返回: (batch_size, 1) 的概率值
         """
+        # 确保输入在正确的设备上
+        X = X.to(self.device)
+        
         # 第一层：Linear + ReLU
         Z1 = torch.matmul(X, self.W1) + self.b1  # (batch, hidden)
         A1 = self.relu(Z1)
@@ -129,7 +136,9 @@ class ManualMLP:
         pos_weight: 正样本（缺陷）的权重
         """
         epsilon = 1e-7  # 防止 log(0)
-        Y_pred = torch.clamp(Y_pred, epsilon, 1 - epsilon)
+        # 使用 torch.where 替代 torch.clamp
+        Y_pred = torch.where(Y_pred < epsilon, torch.ones_like(Y_pred) * epsilon, Y_pred)
+        Y_pred = torch.where(Y_pred > 1 - epsilon, torch.ones_like(Y_pred) * (1 - epsilon), Y_pred)
         
         # 加权 BCE Loss
         loss_pos = -pos_weight * Y_true * torch.log(Y_pred)
@@ -174,7 +183,7 @@ def load_dataset(data_dir, img_size=64):
         filenames: 文件名列表
     """
     img_dir = os.path.join(data_dir, 'img')
-    label_dir = os.path.join(data_dir, 'label')
+    label_dir = os.path.join(data_dir, 'txt')
     
     if not os.path.exists(img_dir):
         raise FileNotFoundError(f"找不到图片目录: {img_dir}")
@@ -301,11 +310,12 @@ def train():
     
     # ===== 超参数设置 =====
     IMG_SIZE = 64  # 图片缩放尺寸（原图 320 太大，建议用 64 或 128）
-    HIDDEN_SIZE = 128  # 隐藏层神经元数量
-    LEARNING_RATE = 0.001  # 学习率
-    EPOCHS = 50  # 训练轮数
-    BATCH_SIZE = 32  # 批次大小
-    POS_WEIGHT = 3.0  # 正样本（缺陷）权重（用于处理类别不平衡）
+    HIDDEN_SIZE = 256  # 隐藏层神经元数量（增加到256以提升表达能力）
+    LEARNING_RATE = 0.005  # 学习率（增加到0.005以加快收敛）
+    EPOCHS = 100  # 训练轮数（增加到100）
+    BATCH_SIZE = 64  # 批次大小（增加到64以利用GPU）
+    POS_WEIGHT = 20.0  # 正样本（缺陷）权重（大幅增加到20以解决类别不平衡）
+    THRESHOLD = 0.3  # 分类阈值（降低到0.3以提高召回率）
     
     # 数据路径（请根据实际情况修改）
     DATA_DIR = './data'  # 假设数据在 Task1/data/ 下
@@ -314,6 +324,16 @@ def train():
     print("=" * 60)
     print("Task 1: Binary Defect Classification - 训练开始")
     print("=" * 60)
+    
+    # ===== GPU 设备检测 =====
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"\n使用设备: {device}")
+    if device == 'cuda':
+        print(f"GPU 名称: {torch.cuda.get_device_name(0)}")
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        print(f"GPU 显存: {gpu_memory:.2f} GB")
+    else:
+        print("警告: 未检测到 GPU，将使用 CPU 训练（速度较慢）")
     
     # ===== 加载数据 =====
     try:
@@ -329,19 +349,20 @@ def train():
     
     print(f"训练集: {len(train_images)} 张, 验证集: {len(val_images)} 张")
     
-    # 转为 Tensor
-    X_train = torch.from_numpy(train_images).float()
-    Y_train = torch.from_numpy(train_labels).float().unsqueeze(1)  # (N, 1)
+    # 转为 Tensor 并移到 GPU
+    X_train = torch.from_numpy(train_images).float().to(device)
+    Y_train = torch.from_numpy(train_labels).float().unsqueeze(1).to(device)  # (N, 1)
     
-    X_val = torch.from_numpy(val_images).float()
-    Y_val = torch.from_numpy(val_labels).float().unsqueeze(1)
+    X_val = torch.from_numpy(val_images).float().to(device)
+    Y_val = torch.from_numpy(val_labels).float().unsqueeze(1).to(device)
     
     # ===== 初始化模型 =====
     input_size = IMG_SIZE * IMG_SIZE * 3  # 64*64*3 = 12288
     model = ManualMLP(input_size=input_size, 
                       hidden_size=HIDDEN_SIZE, 
                       output_size=1, 
-                      learning_rate=LEARNING_RATE)
+                      learning_rate=LEARNING_RATE,
+                      device=device)
     
     print(f"\n模型结构:")
     print(f"  输入层: {input_size}")
@@ -357,8 +378,8 @@ def train():
     n_train = len(X_train)
     
     for epoch in range(EPOCHS):
-        # 随机打乱训练数据
-        perm = torch.randperm(n_train)
+        # 随机打乱训练数据 - 使用 numpy 替代 torch.randperm
+        perm = np.random.permutation(n_train)
         X_train_shuffled = X_train[perm]
         Y_train_shuffled = Y_train[perm]
         
@@ -393,21 +414,23 @@ def train():
             val_pred = model.forward(X_val)
             val_loss = model.compute_loss(val_pred, Y_val, pos_weight=POS_WEIGHT)
             
-            # 计算评价指标
+            # 计算评价指标（使用调整后的阈值）
+            val_pred_cpu = val_pred.cpu() if device == 'cuda' else val_pred
             metrics = compute_metrics(
                 val_labels, 
-                val_pred.numpy().flatten(), 
-                threshold=0.5
+                val_pred_cpu.numpy().flatten(), 
+                threshold=THRESHOLD
             )
         
         # 打印训练信息
-        if (epoch + 1) % 5 == 0 or epoch == 0:
+        if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"Epoch [{epoch+1}/{EPOCHS}] "
                   f"Train Loss: {avg_loss:.4f} | "
                   f"Val Loss: {val_loss:.4f} | "
                   f"F1: {metrics['f1']:.4f} | "
                   f"Precision: {metrics['precision']:.4f} | "
-                  f"Recall: {metrics['recall']:.4f}")
+                  f"Recall: {metrics['recall']:.4f} | "
+                  f"Threshold: {THRESHOLD}")
         
         # 保存最佳模型
         if metrics['f1'] > best_f1:

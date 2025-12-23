@@ -11,7 +11,7 @@ def train():
     # Hyperparameters
     BATCH_SIZE = 16
     LR = 1e-4
-    EPOCHS = 30
+    EPOCHS = 20
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Paths

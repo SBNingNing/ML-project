@@ -85,7 +85,8 @@ def get_inference_loader(data_dir):
             except: pass
         
         if X:
-            yield torch.tensor(np.array(X)).float().to(Config.device), valid_files
+            x_arr = np.array(X, dtype=np.float32)
+            yield torch.from_numpy(x_arr).float().to(Config.device), valid_files
 
 def run_inference(test_dir):
     results = {}

@@ -78,5 +78,7 @@ def data_loader(data_list, batch_size, training=True):
                 Y.append(label)
             except: pass
         if X:
-            yield torch.tensor(np.array(X)).float().to(Config.device), \
-                  torch.tensor(np.array(Y)).float().unsqueeze(1).to(Config.device)
+            x_arr = np.array(X, dtype=np.float32)
+            y_arr = np.array(Y, dtype=np.float32)
+            yield torch.from_numpy(x_arr).float().to(Config.device), \
+                  torch.from_numpy(y_arr).float().unsqueeze(1).to(Config.device)

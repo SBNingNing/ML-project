@@ -18,6 +18,7 @@ class Config:
     # 判定阈值 (后续在 evaluate.py 中算出最佳值后，请修改这里)
     threshold = 0.85 
     
+    # 根据可用性自动选择 GPU/CPU
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     seed = 2025
 
@@ -39,8 +40,10 @@ class Conv2d(Layer):
         self.db = None
         
         # Adam 状态
-        self.m_W, self.v_W = torch.zeros_like(self.W), torch.zeros_like(self.W)
-        self.m_b, self.v_b = torch.zeros_like(self.b), torch.zeros_like(self.b)
+        self.m_W = torch.zeros(self.W.shape, device=Config.device)
+        self.v_W = torch.zeros(self.W.shape, device=Config.device)
+        self.m_b = torch.zeros(self.b.shape, device=Config.device)
+        self.v_b = torch.zeros(self.b.shape, device=Config.device)
 
     def forward(self, x, training=True):
         if training: self.cache = x
@@ -78,8 +81,10 @@ class Linear(Layer):
         self.dW = None
         self.db = None
         
-        self.m_W, self.v_W = torch.zeros_like(self.W), torch.zeros_like(self.W)
-        self.m_b, self.v_b = torch.zeros_like(self.b), torch.zeros_like(self.b)
+        self.m_W = torch.zeros(self.W.shape, device=Config.device)
+        self.v_W = torch.zeros(self.W.shape, device=Config.device)
+        self.m_b = torch.zeros(self.b.shape, device=Config.device)
+        self.v_b = torch.zeros(self.b.shape, device=Config.device)
 
     def forward(self, x, training=True):
         if training: self.cache = x
@@ -126,7 +131,8 @@ class Flatten(Layer):
 
 class Sigmoid(Layer):
     def forward(self, x, training=True):
-        out = torch.sigmoid(x)
+        one = torch.ones(x.shape, device=Config.device)
+        out = torch.div(one, torch.add(one, torch.exp(torch.mul(x, -1))))
         if training: self.cache = out
         return out
     def backward(self, grad): return grad * self.cache * (1.0 - self.cache)

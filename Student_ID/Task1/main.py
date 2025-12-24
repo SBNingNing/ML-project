@@ -37,6 +37,7 @@ class Config:
     lr = 0.0005          
     epochs = 20          
     
+    # 根据可用性自动选择 GPU/CPU
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     save_path = os.path.join(current_dir, 'model_final.pth')
     seed = 2025
@@ -54,10 +55,9 @@ else:
     
 print(f"[Config] Device: {cfg.device}")
 
-# 设置随机种子
+# 设置随机种子（仅使用 random 与 numpy）
 random.seed(cfg.seed)
 np.random.seed(cfg.seed)
-torch.manual_seed(cfg.seed)#疑似没有在白名单？
 
 # ==================== 1. 核心模块 (手动层实现) ====================
 
@@ -75,8 +75,10 @@ class Conv2d(Layer):
         self.W = (torch.randn(out_c, in_c, k, k) * scale).to(cfg.device)
         self.b = torch.zeros(out_c).to(cfg.device)
         # Adam Cache
-        self.m_W, self.v_W = torch.zeros_like(self.W), torch.zeros_like(self.W)
-        self.m_b, self.v_b = torch.zeros_like(self.b), torch.zeros_like(self.b)
+        self.m_W = torch.zeros(self.W.shape, device=cfg.device)
+        self.v_W = torch.zeros(self.W.shape, device=cfg.device)
+        self.m_b = torch.zeros(self.b.shape, device=cfg.device)
+        self.v_b = torch.zeros(self.b.shape, device=cfg.device)
 
     def forward(self, x, training=True):
         if training: self.cache = x
@@ -104,8 +106,10 @@ class Linear(Layer):
         scale = math.sqrt(2.0 / in_f)
         self.W = (torch.randn(in_f, out_f) * scale).to(cfg.device)
         self.b = torch.zeros(out_f).to(cfg.device)
-        self.m_W, self.v_W = torch.zeros_like(self.W), torch.zeros_like(self.W)
-        self.m_b, self.v_b = torch.zeros_like(self.b), torch.zeros_like(self.b)
+        self.m_W = torch.zeros(self.W.shape, device=cfg.device)
+        self.v_W = torch.zeros(self.W.shape, device=cfg.device)
+        self.m_b = torch.zeros(self.b.shape, device=cfg.device)
+        self.v_b = torch.zeros(self.b.shape, device=cfg.device)
 
     def forward(self, x, training=True):
         if training: self.cache = x
@@ -145,7 +149,8 @@ class Flatten(Layer):
 
 class Sigmoid(Layer):
     def forward(self, x, training=True):
-        out = torch.sigmoid(x)#疑似不在白名单？
+        one = torch.ones(x.shape, device=cfg.device)
+        out = torch.div(one, torch.add(one, torch.exp(torch.mul(x, -1))))
         if training: self.cache = out
         return out
     def backward(self, grad): return grad * self.cache * (1.0 - self.cache)
@@ -313,8 +318,10 @@ def data_loader(data_list, batch_size, training=True):
             except: pass
             
         if X:
-            yield torch.tensor(np.array(X)).float().to(cfg.device), \
-                  torch.tensor(np.array(Y)).float().unsqueeze(1).to(cfg.device)
+            x_arr = np.array(X, dtype=np.float32)
+            y_arr = np.array(Y, dtype=np.float32)
+            yield torch.from_numpy(x_arr).float().to(cfg.device), \
+                  torch.from_numpy(y_arr).float().unsqueeze(1).to(cfg.device)
 
 # ==================== 5. 训练与测试流程 ====================
 
@@ -354,8 +361,11 @@ def train():
             pred = model.forward(X, training=True)
             
             # Loss
-            pred = torch.clamp(pred, 1e-7, 1-1e-7)#疑似不在白名单？
-            weights = torch.ones_like(Y)
+            low_bound = torch.ones(pred.shape, device=cfg.device) * 1e-7
+            high_bound = torch.ones(pred.shape, device=cfg.device) * (1 - 1e-7)
+            pred = torch.where(pred < low_bound, low_bound, pred)
+            pred = torch.where(pred > high_bound, high_bound, pred)
+            weights = torch.ones(Y.shape, device=cfg.device)
             weights[Y==1] = 1.2 
             
             loss = -(weights * (Y * torch.log(pred) + (1-Y) * torch.log(1-pred))).mean()

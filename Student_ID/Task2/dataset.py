@@ -1,25 +1,26 @@
 import os
 import glob
 import torch
-import cv2
+import random
 import numpy as np
+from PIL import Image
 from torch.utils.data import Dataset
+import torchvision.transforms.functional as TF
 
 class GlassDataset(Dataset):
-    def __init__(self, root_dir, transform=None, mode='train'):
+    def __init__(self, root_dir, transform=None):
         """
         Args:
-            root_dir (string): Directory with all the images (e.g., 'dataset/train').
-            transform (callable, optional): Optional transform to be applied on a sample.
-            mode (string): 'train' or 'test'.
+            root_dir (string): Directory with 'img' and 'txt' subdirectories.
+            transform (callable, optional): Optional transform to be applied on the image (usually ToTensor + Normalize).
+                                           Note: Resizing and geometric augmentations are handled internally
+                                           to ensure image-mask consistency.
         """
         self.root_dir = root_dir
         self.transform = transform
-        self.mode = mode
         
         # Get all image files
         self.img_paths = glob.glob(os.path.join(root_dir, 'img', '*.png'))
-        # Sort to ensure consistency
         self.img_paths.sort()
 
     def __len__(self):
@@ -28,83 +29,92 @@ class GlassDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.img_paths[idx]
         
-        # Read image
-        image = cv2.imread(img_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        # Resize to 320x320 (Native resolution)
-        image = cv2.resize(image, (320, 320))
-        
-        # Normalize to [0, 1] and convert to tensor (C, H, W)
-        image = image.astype(np.float32) / 255.0
-        image = torch.from_numpy(image).permute(2, 0, 1)
-        
-        if self.transform:
-            image = self.transform(image)
-
-        # If test mode, we might not have labels/masks, but the prompt implies 
-        # this dataset class is used for training where we need targets.
-        # For inference (For_TA_test.py), we might use a simplified version or just ignore targets.
-        # However, let's implement target generation logic.
-        
-        # Construct label path
-        # Image: .../img/filename.png -> Label: .../txt/filename.txt
+        # Determine txt path
         filename = os.path.basename(img_path)
-        txt_name = os.path.splitext(filename)[0] + '.txt'
-        txt_path = os.path.join(self.root_dir, 'txt', txt_name)
+        txt_filename = os.path.splitext(filename)[0] + '.txt'
+        txt_path = os.path.join(self.root_dir, 'txt', txt_filename)
         
-        # Initialize targets
-        # labels: [No Defect, Chipped, Scratch, Stain]
+        # Read Image
+        try:
+            image = Image.open(img_path).convert('RGB')
+        except Exception as e:
+            # Handle image loading errors
+            print(f"Error loading {img_path}: {e}")
+            # Return a dummy black image to avoid crashing
+            image = Image.new('RGB', (320, 320))
+
+        # 1. Resize Step (Target Resolution 320x320)
+        target_h, target_w = 320, 320
+        image = image.resize((target_w, target_h), Image.BILINEAR)
+        
+        # Initialize Labels
+        # Labels: [No Defect, Chipped, Scratch, Stain]
         labels = torch.zeros(4, dtype=torch.float32)
-        # mask: (1, 320, 320)
-        mask = torch.zeros((1, 320, 320), dtype=torch.float32)
         
+        # Initialize Mask (1, 320, 320)
+        mask = torch.zeros((1, target_h, target_w), dtype=torch.float32)
+        
+        yolo_to_internal = {0: 1, 1: 2, 2: 3}
         has_defect = False
         
+        # Generate Mask from TXT
         if os.path.exists(txt_path):
-            with open(txt_path, 'r') as f:
-                lines = f.readlines()
+            try:
+                with open(txt_path, 'r') as f:
+                    lines = f.readlines()
                 
-            for line in lines:
-                parts = line.strip().split()
-                if len(parts) == 5:
-                    has_defect = True
-                    class_id = int(parts[0]) # 0: Chipped, 1: Scratch, 2: Stain
-                    x_c, y_c, w, h = map(float, parts[1:])
-                    
-                    # Map class_id to internal index
-                    # 0(Chipped) -> 1
-                    # 1(Scratch) -> 2
-                    # 2(Stain)   -> 3
-                    internal_idx = class_id + 1
-                    if internal_idx < 4:
-                        labels[internal_idx] = 1.0
-                    
-                    # Generate mask
-                    # Convert normalized coords to 320x320
-                    # x_c, y_c, w, h are normalized [0, 1]
-                    
-                    img_h, img_w = 320, 320
-                    
-                    x_center = x_c * img_w
-                    y_center = y_c * img_h
-                    width = w * img_w
-                    height = h * img_h
-                    
-                    x_min = int(x_center - width / 2)
-                    y_min = int(y_center - height / 2)
-                    x_max = int(x_center + width / 2)
-                    y_max = int(y_center + height / 2)
-                    
-                    # Clip to image boundaries
-                    x_min = max(0, x_min)
-                    y_min = max(0, y_min)
-                    x_max = min(img_w, x_max)
-                    y_max = min(img_h, y_max)
-                    
-                    mask[0, y_min:y_max, x_min:x_max] = 1.0
+                if len(lines) > 0:
+                    for line in lines:
+                        parts = line.strip().split()
+                        if len(parts) == 5:
+                            cls_id = int(parts[0])
+                            
+                            if cls_id in yolo_to_internal:
+                                has_defect = True
+                                internal_idx = yolo_to_internal[cls_id]
+                                labels[internal_idx] = 1.0
+                                
+                                x_c, y_c, w, h = map(float, parts[1:])
+                                
+                                # Convert normalized coords to target_h/target_w
+                                x1 = int((x_c - w / 2) * target_w)
+                                y1 = int((y_c - h / 2) * target_h)
+                                x2 = int((x_c + w / 2) * target_w)
+                                y2 = int((y_c + h / 2) * target_h)
+                                
+                                x1 = max(0, min(target_w, x1))
+                                y1 = max(0, min(target_h, y1))
+                                x2 = max(0, min(target_w, x2))
+                                y2 = max(0, min(target_h, y2))
+                                
+                                if x2 > x1 and y2 > y1:
+                                    mask[0, y1:y2, x1:x2] = 1.0
+            except Exception as e:
+                print(f"Error reading {txt_path}: {e}")
 
         if not has_defect:
             labels[0] = 1.0
+            
+        # 2. Data Augmentation (Synchronized for Image & Mask)
+        # Apply transforms on PIL Image and Tensor Mask
+        # Random Horizontal Flip
+        if random.random() > 0.5:
+            image = TF.hflip(image)
+            mask = TF.hflip(mask)
+            
+        # Random Vertical Flip
+        if random.random() > 0.5:
+            image = TF.vflip(image)
+            mask = TF.vflip(mask)
+            
+        # Random Rotation
+        if random.random() > 0.5:
+            angle = random.uniform(-15, 15)
+            image = TF.rotate(image, angle)
+            mask = TF.rotate(mask, angle)
+
+        # 3. Apply Final Transforms (ToTensor, Normalize) to Image
+        if self.transform:
+            image = self.transform(image)
             
         return image, labels, mask
